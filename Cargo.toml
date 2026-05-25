@@ -1,0 +1,13 @@
+[package]
+name = "llm-chain"
+version = "0.1.0"
+edition = "2021"
+description = "Build sequential LLM call chains where each output feeds the next input"
+license = "MIT"
+repository = "https://github.com/MukundaKatta/llm-chain-rs"
+keywords = ["llm", "chain", "agent", "pipeline", "prompts"]
+categories = ["text-processing"]
+exclude = ["target/*", ".github/*", "*.log"]
+
+[dependencies]
+serde_json = "1"
