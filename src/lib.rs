@@ -27,25 +27,73 @@ pub struct Step {
 }
 
 impl Step {
+    /// Create a `user`-role step from a prompt template.
     pub fn user(template: impl Into<String>) -> Self {
-        Self { role: "user".into(), template: template.into(), name: None }
+        Self {
+            role: "user".into(),
+            template: template.into(),
+            name: None,
+        }
     }
 
+    /// Create a `system`-role step from a prompt template.
     pub fn system(template: impl Into<String>) -> Self {
-        Self { role: "system".into(), template: template.into(), name: None }
+        Self {
+            role: "system".into(),
+            template: template.into(),
+            name: None,
+        }
     }
 
+    /// Create an `assistant`-role step from a template.
+    ///
+    /// Useful for seeding a conversation with a canned assistant turn or for
+    /// replaying a prior reply when building history-aware chains.
+    pub fn assistant(template: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            template: template.into(),
+            name: None,
+        }
+    }
+
+    /// Attach a name to this step (builder style). Returns `self`.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
-    /// Render the template, replacing `{{input}}` with `input`.
+    /// Render the template, replacing the `{{input}}` placeholder with `input`.
     pub fn render(&self, input: &str) -> String {
         self.template.replace("{{input}}", input)
     }
 
-    /// Build the message object for this step.
+    /// Render the template, substituting `{{input}}` with `input` and every
+    /// `{{key}}` found in `vars` with its corresponding value.
+    ///
+    /// `{{input}}` is applied first, so a `vars` entry keyed `"input"` is
+    /// ignored. Placeholders without a matching variable are left untouched.
+    ///
+    /// ```
+    /// use llm_chain::Step;
+    /// let s = Step::user("Hi {{name}}, about {{input}}");
+    /// let vars = [("name", "Ada")];
+    /// assert_eq!(s.render_with("Rust", vars), "Hi Ada, about Rust");
+    /// ```
+    pub fn render_with<K, V>(&self, input: &str, vars: impl IntoIterator<Item = (K, V)>) -> String
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut out = self.render(input);
+        for (key, value) in vars {
+            let placeholder = format!("{{{{{}}}}}", key.as_ref());
+            out = out.replace(&placeholder, value.as_ref());
+        }
+        out
+    }
+
+    /// Build the `{"role": ..., "content": ...}` JSON message for this step.
     pub fn to_message(&self, input: &str) -> Value {
         json!({"role": self.role, "content": self.render(input)})
     }
@@ -68,23 +116,45 @@ pub struct Chain {
 }
 
 impl Chain {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Accumulate conversation history across steps.
-    pub fn with_history(mut self) -> Self { self.history = true; self }
+    pub fn with_history(mut self) -> Self {
+        self.history = true;
+        self
+    }
 
     pub fn step(mut self, step: Step) -> Self {
         self.steps.push(step);
         self
     }
 
-    pub fn len(&self) -> usize { self.steps.len() }
-    pub fn is_empty(&self) -> bool { self.steps.is_empty() }
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
 
-    /// Build the message list for step at `index` with given input.
+    /// Build the message list for the step at `index` with the given input.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds. Use [`Chain::try_build_messages_for`]
+    /// for a non-panicking variant.
     pub fn build_messages_for(&self, index: usize, input: &str) -> Vec<Value> {
         let step = &self.steps[index];
         vec![step.to_message(input)]
+    }
+
+    /// Build the message list for the step at `index`, returning `None` if the
+    /// index is out of bounds.
+    ///
+    /// This is the non-panicking counterpart to [`Chain::build_messages_for`].
+    pub fn try_build_messages_for(&self, index: usize, input: &str) -> Option<Vec<Value>> {
+        self.steps.get(index).map(|s| vec![s.to_message(input)])
     }
 
     /// Build all step results given an initial input.
@@ -124,7 +194,9 @@ impl Chain {
         self.steps.get(step_index).map(|s| s.to_message(input))
     }
 
-    pub fn steps(&self) -> &[Step] { &self.steps }
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +304,75 @@ mod tests {
         let c = Chain::new();
         assert!(c.is_empty());
         assert!(c.prepare("x").is_empty());
+    }
+
+    #[test]
+    fn assistant_step_role() {
+        let s = Step::assistant("Sure, here you go.");
+        let m = s.to_message("");
+        assert_eq!(m["role"], "assistant");
+        assert_eq!(m["content"], "Sure, here you go.");
+    }
+
+    #[test]
+    fn render_with_substitutes_extra_vars() {
+        let s = Step::user("Hi {{name}}, tell me about {{input}}.");
+        let rendered = s.render_with("Rust", [("name", "Ada")]);
+        assert_eq!(rendered, "Hi Ada, tell me about Rust.");
+    }
+
+    #[test]
+    fn render_with_leaves_unknown_placeholders() {
+        let s = Step::user("{{greeting}} {{input}}");
+        let rendered = s.render_with("world", std::iter::empty::<(&str, &str)>());
+        assert_eq!(rendered, "{{greeting}} world");
+    }
+
+    #[test]
+    fn render_with_input_takes_precedence() {
+        // `{{input}}` is rendered first, so a "input" var entry is ignored.
+        let s = Step::user("{{input}}");
+        let rendered = s.render_with("real", [("input", "override")]);
+        assert_eq!(rendered, "real");
+    }
+
+    #[test]
+    fn render_with_owned_strings() {
+        let s = Step::user("{{a}}-{{b}}");
+        let vars = vec![
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+        ];
+        assert_eq!(s.render_with("", vars), "1-2");
+    }
+
+    #[test]
+    fn try_build_messages_for_in_bounds() {
+        let c = Chain::new().step(Step::user("Hi {{input}}"));
+        let msgs = c.try_build_messages_for(0, "world").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["content"], "Hi world");
+    }
+
+    #[test]
+    fn try_build_messages_for_out_of_bounds() {
+        let c = Chain::new().step(Step::user("Hi"));
+        assert!(c.try_build_messages_for(5, "x").is_none());
+    }
+
+    #[test]
+    #[should_panic]
+    fn build_messages_for_panics_out_of_bounds() {
+        let c = Chain::new();
+        let _ = c.build_messages_for(0, "x");
+    }
+
+    #[test]
+    fn steps_accessor_returns_all() {
+        let c = Chain::new()
+            .step(Step::system("sys"))
+            .step(Step::user("usr"));
+        assert_eq!(c.steps().len(), 2);
+        assert_eq!(c.steps()[0].role, "system");
     }
 }
